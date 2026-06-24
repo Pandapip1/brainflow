@@ -78,6 +78,7 @@ SET (BOARD_CONTROLLER_SRC
     ${CMAKE_CURRENT_SOURCE_DIR}/src/board_controller/ble_lib_board.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/board_controller/muse/muse.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/board_controller/muse/muse_athena.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/board_controller/muse2014/muse2014.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/board_controller/brainalive/brainalive.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/board_controller/emotibit/emotibit.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/src/board_controller/ntl/ntl_wifi.cpp
@@ -139,6 +140,7 @@ target_include_directories (
     ${CMAKE_CURRENT_SOURCE_DIR}/src/board_controller/neuromd/brainbit_bglib/inc
     ${CMAKE_CURRENT_SOURCE_DIR}/src/board_controller/muse/inc
     ${CMAKE_CURRENT_SOURCE_DIR}/src/board_controller/muse/muse_bglib/inc
+    ${CMAKE_CURRENT_SOURCE_DIR}/src/board_controller/muse2014/inc
     ${CMAKE_CURRENT_SOURCE_DIR}/third_party/neurosdk/inc/types
     ${CMAKE_CURRENT_SOURCE_DIR}/src/board_controller/neurosity/inc
     ${CMAKE_CURRENT_SOURCE_DIR}/third_party/gForceSDKCXX/src/inc

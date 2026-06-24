@@ -85,7 +85,8 @@ BrainFlowBoards::BrainFlowBoards()
             {"64", json::object()},
             {"65", json::object()},
             {"66", json::object()},
-            {"67", json::object()}
+            {"67", json::object()},
+            {"68", json::object()}
         }
     }};
 
@@ -1198,6 +1199,17 @@ BrainFlowBoards::BrainFlowBoards()
         {"num_rows", 20},
         {"optical_channels", {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16}},
         {"battery_channel", 17}
+    };
+    brainflow_boards_json["boards"]["68"]["default"] =
+    {
+        {"name", "Muse2014"},
+        {"sampling_rate", 220},
+        {"timestamp_channel", 5},
+        {"marker_channel", 6},
+        {"package_num_channel", 0},
+        {"num_rows", 7},
+        {"eeg_channels", {1, 2, 3, 4}},
+        {"eeg_names", "TP9,AF7,AF8,TP10"}
     };
 }
 
