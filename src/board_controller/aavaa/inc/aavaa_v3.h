@@ -16,16 +16,12 @@ public:
     AAVAAv3 (struct BrainFlowInputParams params);
     ~AAVAAv3 () override;
 
-    int prepare_session () override;
     int start_stream (int buffer_size, const char *streamer_params) override;
     int stop_stream () override;
     int release_session () override;
     int config_board (std::string config, std::string &response) override;
     int send_command (std::string config);
 
-    void adapter_1_on_scan_start (simpleble_adapter_t adapter);
-    void adapter_1_on_scan_stop (simpleble_adapter_t adapter);
-    void adapter_1_on_scan_found (simpleble_adapter_t adapter, simpleble_peripheral_t peripheral);
     void read_data (simpleble_uuid_t service, simpleble_uuid_t characteristic, const uint8_t *data,
         size_t size);
     std::deque<uint8_t> Incoming_BLE_Data_Buffer;
@@ -40,14 +36,13 @@ protected:
     const double ADS1299_gain = 12.; // assumed gain setting for ADS1299
     const double EEG_SCALE = ADS1299_Vref / float ((pow (2, 23) - 1)) / ADS1299_gain * 1000000.0;
 
-    volatile simpleble_adapter_t aavaa_adapter;
-    volatile simpleble_peripheral_t aavaa_peripheral;
-    bool initialized;
     bool is_streaming;
-    std::mutex m;
-    std::condition_variable cv;
     std::pair<simpleble_uuid_t, simpleble_uuid_t> notified_characteristics;
     std::pair<simpleble_uuid_t, simpleble_uuid_t> write_characteristics;
     std::string start_command;
     std::string stop_command;
+
+    void before_discover () override;
+    int setup_session () override;
+    bool matches_target_name (const char *identifier) override;
 };

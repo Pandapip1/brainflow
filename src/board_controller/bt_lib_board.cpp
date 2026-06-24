@@ -38,6 +38,7 @@ BTLibBoard::BTLibBoard (int board_id, struct BrainFlowInputParams params) : Boar
     safe_logger (spdlog::level::debug, "use dyn lib: {}", bluetoothlib_path.c_str ());
     dll_loader = new DLLLoader (bluetoothlib_path.c_str ());
     initialized = false;
+    last_discover_error = (int)BrainFlowExitCodes::STATUS_OK;
 }
 
 BTLibBoard::~BTLibBoard ()
@@ -74,21 +75,9 @@ int BTLibBoard::prepare_session ()
     {
         safe_logger (
             spdlog::level::warn, "mac address is not provided, trying to autodiscover device");
-        int res = find_bt_addr (get_name_selector ().c_str ());
-        if (res == (int)SocketBluetoothReturnCodes::UNIMPLEMENTED_ERROR)
+        if (!find_already_connected () && !discover (params.timeout))
         {
-            safe_logger (spdlog::level::err, "autodiscovery for this OS is not supported");
-            return_res = (int)BrainFlowExitCodes::INVALID_ARGUMENTS_ERROR;
-        }
-        else if (res == (int)SocketBluetoothReturnCodes::DEVICE_IS_NOT_DISCOVERABLE)
-        {
-            safe_logger (spdlog::level::err, "check that device paired and connected");
-            return_res = (int)BrainFlowExitCodes::BOARD_NOT_READY_ERROR;
-        }
-        else if (res != (int)SocketBluetoothReturnCodes::STATUS_OK)
-        {
-            safe_logger (spdlog::level::err, "failed to autodiscover device: {}", res);
-            return_res = (int)BrainFlowExitCodes::GENERAL_ERROR;
+            return_res = last_discover_error;
         }
         else
         {
@@ -108,6 +97,49 @@ int BTLibBoard::prepare_session ()
     }
 
     return return_res;
+}
+
+bool BTLibBoard::find_already_connected ()
+{
+    // The RFCOMM transport here talks to the kernel directly through a raw AF_BLUETOOTH socket
+    // (see socket_bluetooth_linux.cpp) and never goes through BlueZ's D-Bus API at all, so
+    // there's currently no way to ask "is a matching device already paired/connected" the way
+    // BLELibBoard does via simpleble_adapter_get_connected_peripherals_handle. Doing that for
+    // real would mean adding a D-Bus dependency to a build target (--bluetooth) that doesn't
+    // otherwise need one, which is a deliberate choice to leave for a follow-up rather than
+    // pull in silently here. Always returns false; discover() is the only path today.
+    return false;
+}
+
+bool BTLibBoard::discover (int timeout_sec)
+{
+    // This transport's discovery is a single name-based SDP/inquiry lookup with no scan
+    // duration of its own (see SocketBluetooth::discover), so timeout_sec is unused; kept for
+    // HWProber conformance so callers don't need to know that.
+    (void)timeout_sec;
+
+    int res = find_bt_addr (get_name_selector ().c_str ());
+    if (res == (int)SocketBluetoothReturnCodes::UNIMPLEMENTED_ERROR)
+    {
+        safe_logger (spdlog::level::err, "autodiscovery for this OS is not supported");
+        last_discover_error = (int)BrainFlowExitCodes::INVALID_ARGUMENTS_ERROR;
+    }
+    else if (res == (int)SocketBluetoothReturnCodes::DEVICE_IS_NOT_DISCOVERABLE)
+    {
+        safe_logger (spdlog::level::err, "check that device paired and connected");
+        last_discover_error = (int)BrainFlowExitCodes::BOARD_NOT_READY_ERROR;
+    }
+    else if (res != (int)SocketBluetoothReturnCodes::STATUS_OK)
+    {
+        safe_logger (spdlog::level::err, "failed to autodiscover device: {}", res);
+        last_discover_error = (int)BrainFlowExitCodes::GENERAL_ERROR;
+    }
+    else
+    {
+        last_discover_error = (int)BrainFlowExitCodes::STATUS_OK;
+    }
+
+    return last_discover_error == (int)BrainFlowExitCodes::STATUS_OK;
 }
 
 int BTLibBoard::release_session ()

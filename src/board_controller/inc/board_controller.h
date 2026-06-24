@@ -45,6 +45,13 @@ extern "C"
         const char *streamer, int preset, int board_id, const char *json_brainflow_input_params);
     SHARED_EXPORT int CALLING_CONVENTION release_all_sessions ();
 
+    // Probes all HWProber-capable board types simultaneously and returns a JSON array of
+    // {"board_id":N} objects for every board that was found within timeout_sec seconds.
+    // BLE boards are probed sequentially (shared adapter); Bluetooth and Wi-Fi transports
+    // run in parallel. Callers use the returned board_id(s) with prepare_session().
+    SHARED_EXPORT int CALLING_CONVENTION scan_boards (
+        int timeout_sec, char *result_json, int *result_json_len, int max_len);
+
     // logging methods
     SHARED_EXPORT int CALLING_CONVENTION set_log_level_board_controller (int log_level);
     SHARED_EXPORT int CALLING_CONVENTION set_log_file_board_controller (const char *log_file);

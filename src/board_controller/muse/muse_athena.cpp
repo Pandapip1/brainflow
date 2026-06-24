@@ -133,12 +133,6 @@ int MuseAthena::parse_muse_options ()
 }
 
 
-void athena_adapter_on_scan_found (
-    simpleble_adapter_t adapter, simpleble_peripheral_t peripheral, void *board)
-{
-    ((MuseAthena *)(board))->adapter_on_scan_found (adapter, peripheral);
-}
-
 void athena_peripheral_on_data (simpleble_peripheral_t peripheral, simpleble_uuid_t service,
     simpleble_uuid_t characteristic, const uint8_t *data, size_t size, void *board)
 {
@@ -154,9 +148,6 @@ void athena_peripheral_on_status (simpleble_peripheral_t peripheral, simpleble_u
 MuseAthena::MuseAthena (int board_id, struct BrainFlowInputParams params)
     : BLELibBoard (board_id, params)
 {
-    initialized = false;
-    muse_adapter = NULL;
-    muse_peripheral = NULL;
     is_streaming = false;
     reset_timestamps ();
     last_battery = 0.0;
@@ -170,13 +161,8 @@ MuseAthena::~MuseAthena ()
     release_session ();
 }
 
-int MuseAthena::prepare_session ()
+int MuseAthena::validate_params ()
 {
-    if (initialized)
-    {
-        safe_logger (spdlog::level::info, "Session is already prepared");
-        return (int)BrainFlowExitCodes::STATUS_OK;
-    }
     int res = parse_muse_options ();
     if (res != (int)BrainFlowExitCodes::STATUS_OK)
     {
@@ -184,162 +170,93 @@ int MuseAthena::prepare_session ()
     }
     safe_logger (spdlog::level::info, "Use MuseAthena preset {} and low_latency {}", muse_preset,
         enable_low_latency);
-    if (params.timeout < 1)
-    {
-        params.timeout = 6;
-    }
-    safe_logger (spdlog::level::info, "Use timeout for discovery: {}", params.timeout);
-    if (!init_dll_loader ())
-    {
-        safe_logger (spdlog::level::err, "Failed to init dll_loader");
-        return (int)BrainFlowExitCodes::GENERAL_ERROR;
-    }
-    size_t adapter_count = simpleble_adapter_get_count ();
-    if (adapter_count == 0)
-    {
-        safe_logger (spdlog::level::err, "No BLE adapters found");
-        return (int)BrainFlowExitCodes::UNABLE_TO_OPEN_PORT_ERROR;
-    }
+    return (int)BrainFlowExitCodes::STATUS_OK;
+}
 
-    safe_logger (spdlog::level::info, "found {} BLE adapter(s)", adapter_count);
+int MuseAthena::default_timeout () const
+{
+    return 6;
+}
 
-    muse_adapter = simpleble_adapter_get_handle (0);
-    if (muse_adapter == NULL)
-    {
-        safe_logger (spdlog::level::err, "Adapter is NULL");
-        return (int)BrainFlowExitCodes::UNABLE_TO_OPEN_PORT_ERROR;
-    }
-
-    simpleble_adapter_set_callback_on_scan_found (
-        muse_adapter, ::athena_adapter_on_scan_found, (void *)this);
-
-    if (!simpleble_adapter_is_bluetooth_enabled ())
-    {
-        safe_logger (spdlog::level::warn, "Probably bluetooth is disabled.");
-        // dont throw an exception because of this
-        // https://github.com/OpenBluetoothToolbox/SimpleBLE/issues/115
-    }
-
-    {
-        // Release m before stopping the scan; macOS scan callbacks also take it.
-        simpleble_adapter_scan_start (muse_adapter);
-        std::unique_lock<std::mutex> lk (m);
-        auto sec = std::chrono::seconds (1);
-        if (cv.wait_for (
-                lk, params.timeout * sec, [this] { return this->muse_peripheral != NULL; }))
-        {
-            safe_logger (spdlog::level::info, "Found MuseAthena device");
-        }
-        else
-        {
-            safe_logger (spdlog::level::err, "Failed to find MuseAthena Device");
-            res = (int)BrainFlowExitCodes::BOARD_NOT_READY_ERROR;
-        }
-    }
-    // Prevent new scan callbacks from re-entering BrainFlow while SimpleBLE stops the scan.
-    simpleble_adapter_set_callback_on_scan_found (muse_adapter, NULL, NULL);
-    simpleble_adapter_scan_stop (muse_adapter);
-    if (res == (int)BrainFlowExitCodes::STATUS_OK)
-    {
-        // for safety
-        for (int i = 0; i < 3; i++)
-        {
-            safe_logger (spdlog::level::info, "Connect to MuseAthena Device attempt {}/3", i + 1);
-            if (simpleble_peripheral_connect (muse_peripheral) == SIMPLEBLE_SUCCESS)
-            {
-                safe_logger (spdlog::level::info, "Connected to MuseAthena Device");
-                res = (int)BrainFlowExitCodes::STATUS_OK;
-                break;
-            }
-            else
-            {
-                safe_logger (
-                    spdlog::level::warn, "Failed to connect to MuseAthena Device: {}/3", i);
-                res = (int)BrainFlowExitCodes::BOARD_NOT_READY_ERROR;
-                std::this_thread::sleep_for (std::chrono::seconds (1));
-            }
-        }
-    }
-
+int MuseAthena::setup_session ()
+{
     // https://github.com/OpenBluetoothToolbox/SimpleBLE/issues/26#issuecomment-955606799
     std::this_thread::sleep_for (std::chrono::seconds (1));
 
+    int res = (int)BrainFlowExitCodes::STATUS_OK;
     bool control_characteristics_found = false;
     bool data_characteristics_notified = false;
 
-    if (res == (int)BrainFlowExitCodes::STATUS_OK)
+    size_t services_count = simpleble_peripheral_services_count (target_peripheral);
+    for (size_t i = 0; i < services_count; i++)
     {
-        size_t services_count = simpleble_peripheral_services_count (muse_peripheral);
-        for (size_t i = 0; i < services_count; i++)
+        simpleble_service_t service;
+        if (simpleble_peripheral_services_get (target_peripheral, i, &service) !=
+            SIMPLEBLE_SUCCESS)
         {
-            simpleble_service_t service;
-            if (simpleble_peripheral_services_get (muse_peripheral, i, &service) !=
-                SIMPLEBLE_SUCCESS)
+            safe_logger (spdlog::level::err, "failed to get service");
+            res = (int)BrainFlowExitCodes::BOARD_NOT_READY_ERROR;
+        }
+
+        safe_logger (spdlog::level::trace, "found service {}", service.uuid.value);
+        for (size_t j = 0; j < service.characteristic_count; j++)
+        {
+            safe_logger (spdlog::level::trace, "found characteristic {}",
+                service.characteristics[j].uuid.value);
+
+            if (strcmp (service.characteristics[j].uuid.value,
+                    MUSE_ATHENA_GATT_ATTR_STREAM_TOGGLE) == 0)
             {
-                safe_logger (spdlog::level::err, "failed to get service");
-                res = (int)BrainFlowExitCodes::BOARD_NOT_READY_ERROR;
+                control_characteristics = std::pair<simpleble_uuid_t, simpleble_uuid_t> (
+                    service.uuid, service.characteristics[j].uuid);
+                control_characteristics_found = true;
+                safe_logger (spdlog::level::info, "found control characteristic");
+                if (simpleble_peripheral_notify (target_peripheral, service.uuid,
+                        service.characteristics[j].uuid, ::athena_peripheral_on_status,
+                        (void *)this) == SIMPLEBLE_SUCCESS)
+                {
+                    notified_characteristics.push_back (
+                        std::pair<simpleble_uuid_t, simpleble_uuid_t> (
+                            service.uuid, service.characteristics[j].uuid));
+                }
+                else
+                {
+                    safe_logger (spdlog::level::warn, "Failed to notify for control {} {}",
+                        service.uuid.value, service.characteristics[j].uuid.value);
+                }
             }
 
-            safe_logger (spdlog::level::trace, "found service {}", service.uuid.value);
-            for (size_t j = 0; j < service.characteristic_count; j++)
+            bool is_data_1 =
+                strcmp (service.characteristics[j].uuid.value, MUSE_ATHENA_GATT_DATA_1) == 0;
+            bool is_data_2 =
+                strcmp (service.characteristics[j].uuid.value, MUSE_ATHENA_GATT_DATA_2) == 0;
+            if (is_data_1 || is_data_2)
             {
-                safe_logger (spdlog::level::trace, "found characteristic {}",
-                    service.characteristics[j].uuid.value);
-
-                if (strcmp (service.characteristics[j].uuid.value,
-                        MUSE_ATHENA_GATT_ATTR_STREAM_TOGGLE) == 0)
+                // Athena multiplexes EEG, IMU, optics, and battery packets by packet tag.
+                // LibMuse maps both data characteristics, but not all firmware exposes both
+                // as notify-capable.
+                if (!service.characteristics[j].can_notify)
                 {
-                    control_characteristics = std::pair<simpleble_uuid_t, simpleble_uuid_t> (
-                        service.uuid, service.characteristics[j].uuid);
-                    control_characteristics_found = true;
-                    safe_logger (spdlog::level::info, "found control characteristic");
-                    if (simpleble_peripheral_notify (muse_peripheral, service.uuid,
-                            service.characteristics[j].uuid, ::athena_peripheral_on_status,
-                            (void *)this) == SIMPLEBLE_SUCCESS)
-                    {
-                        notified_characteristics.push_back (
-                            std::pair<simpleble_uuid_t, simpleble_uuid_t> (
-                                service.uuid, service.characteristics[j].uuid));
-                    }
-                    else
-                    {
-                        safe_logger (spdlog::level::warn, "Failed to notify for control {} {}",
-                            service.uuid.value, service.characteristics[j].uuid.value);
-                    }
+                    safe_logger (spdlog::level::info,
+                        "Skip MuseAthena data characteristic {} because it does not support "
+                        "notifications",
+                        service.characteristics[j].uuid.value);
+                    continue;
                 }
-
-                bool is_data_1 =
-                    strcmp (service.characteristics[j].uuid.value, MUSE_ATHENA_GATT_DATA_1) == 0;
-                bool is_data_2 =
-                    strcmp (service.characteristics[j].uuid.value, MUSE_ATHENA_GATT_DATA_2) == 0;
-                if (is_data_1 || is_data_2)
+                if (simpleble_peripheral_notify (target_peripheral, service.uuid,
+                        service.characteristics[j].uuid, ::athena_peripheral_on_data,
+                        (void *)this) == SIMPLEBLE_SUCCESS)
                 {
-                    // Athena multiplexes EEG, IMU, optics, and battery packets by packet tag.
-                    // LibMuse maps both data characteristics, but not all firmware exposes both
-                    // as notify-capable.
-                    if (!service.characteristics[j].can_notify)
-                    {
-                        safe_logger (spdlog::level::info,
-                            "Skip MuseAthena data characteristic {} because it does not support "
-                            "notifications",
-                            service.characteristics[j].uuid.value);
-                        continue;
-                    }
-                    if (simpleble_peripheral_notify (muse_peripheral, service.uuid,
-                            service.characteristics[j].uuid, ::athena_peripheral_on_data,
-                            (void *)this) == SIMPLEBLE_SUCCESS)
-                    {
-                        notified_characteristics.push_back (
-                            std::pair<simpleble_uuid_t, simpleble_uuid_t> (
-                                service.uuid, service.characteristics[j].uuid));
-                        data_characteristics_notified = true;
-                    }
-                    else
-                    {
-                        safe_logger (spdlog::level::warn,
-                            "Failed to notify MuseAthena data characteristic {} {}",
-                            service.uuid.value, service.characteristics[j].uuid.value);
-                    }
+                    notified_characteristics.push_back (
+                        std::pair<simpleble_uuid_t, simpleble_uuid_t> (
+                            service.uuid, service.characteristics[j].uuid));
+                    data_characteristics_notified = true;
+                }
+                else
+                {
+                    safe_logger (spdlog::level::warn,
+                        "Failed to notify MuseAthena data characteristic {} {}",
+                        service.uuid.value, service.characteristics[j].uuid.value);
                 }
             }
         }
@@ -358,7 +275,6 @@ int MuseAthena::prepare_session ()
 
     if (res == (int)BrainFlowExitCodes::STATUS_OK)
     {
-        initialized = true;
         res = config_board ("v6");
     }
     if (res == (int)BrainFlowExitCodes::STATUS_OK)
@@ -385,11 +301,6 @@ int MuseAthena::prepare_session ()
     {
         std::this_thread::sleep_for (std::chrono::milliseconds (200));
     }
-    if (res != (int)BrainFlowExitCodes::STATUS_OK)
-    {
-        release_session ();
-    }
-
     return res;
 }
 
@@ -445,7 +356,7 @@ int MuseAthena::start_stream (int buffer_size, const char *streamer_params)
 
 int MuseAthena::stop_stream ()
 {
-    if (muse_peripheral == NULL)
+    if (target_peripheral == NULL)
     {
         return (int)BrainFlowExitCodes::BOARD_NOT_CREATED_ERROR;
     }
@@ -456,7 +367,7 @@ int MuseAthena::stop_stream ()
         if (res != (int)BrainFlowExitCodes::STATUS_OK)
         {
             bool is_connected = false;
-            if ((simpleble_peripheral_is_connected (muse_peripheral, &is_connected) ==
+            if ((simpleble_peripheral_is_connected (target_peripheral, &is_connected) ==
                     SIMPLEBLE_SUCCESS) &&
                 (!is_connected))
             {
@@ -483,8 +394,8 @@ int MuseAthena::release_session ()
         for (int i = 0; i < 2; i++)
         {
             bool is_connected = true;
-            if ((muse_peripheral != NULL) &&
-                (simpleble_peripheral_is_connected (muse_peripheral, &is_connected) ==
+            if ((target_peripheral != NULL) &&
+                (simpleble_peripheral_is_connected (target_peripheral, &is_connected) ==
                     SIMPLEBLE_SUCCESS) &&
                 (!is_connected))
             {
@@ -492,7 +403,7 @@ int MuseAthena::release_session ()
             }
 
             stop_stream ();
-            if (muse_peripheral != NULL)
+            if (target_peripheral != NULL)
             {
                 // need to wait for notifications to stop triggered before unsubscribing, otherwise
                 // macos fails inside simpleble with timeout
@@ -500,7 +411,7 @@ int MuseAthena::release_session ()
                 for (auto notified : notified_characteristics)
                 {
                     if (simpleble_peripheral_unsubscribe (
-                            muse_peripheral, notified.first, notified.second) != SIMPLEBLE_SUCCESS)
+                            target_peripheral, notified.first, notified.second) != SIMPLEBLE_SUCCESS)
                     {
                         safe_logger (spdlog::level::err, "failed to unsubscribe for {} {}",
                             notified.first.value, notified.second.value);
@@ -512,24 +423,7 @@ int MuseAthena::release_session ()
         initialized = false;
         notified_characteristics.clear ();
     }
-    if (muse_peripheral != NULL)
-    {
-        bool is_connected = false;
-        if (simpleble_peripheral_is_connected (muse_peripheral, &is_connected) == SIMPLEBLE_SUCCESS)
-        {
-            if (is_connected)
-            {
-                simpleble_peripheral_disconnect (muse_peripheral);
-            }
-        }
-        simpleble_peripheral_release_handle (muse_peripheral);
-        muse_peripheral = NULL;
-    }
-    if (muse_adapter != NULL)
-    {
-        simpleble_adapter_release_handle (muse_adapter);
-        muse_adapter = NULL;
-    }
+    release_peripheral ();
 
     return (int)BrainFlowExitCodes::STATUS_OK;
 }
@@ -560,7 +454,7 @@ int MuseAthena::config_board (std::string config)
     }
     command[len + 1] = 10;
     safe_logger (spdlog::level::trace, "Command to send: {}", bytes_to_string (command, len + 2));
-    if (simpleble_peripheral_write_command (muse_peripheral, control_characteristics.first,
+    if (simpleble_peripheral_write_command (target_peripheral, control_characteristics.first,
             control_characteristics.second, command, len + 2) != SIMPLEBLE_SUCCESS)
     {
         safe_logger (spdlog::level::err, "failed to send command {} to device", config.c_str ());
@@ -569,57 +463,11 @@ int MuseAthena::config_board (std::string config)
     return (int)BrainFlowExitCodes::STATUS_OK;
 }
 
-void MuseAthena::adapter_on_scan_found (
-    simpleble_adapter_t adapter, simpleble_peripheral_t peripheral)
+bool MuseAthena::matches_target_name (const char *identifier)
 {
-    (void)adapter;
-    char *peripheral_identified = simpleble_peripheral_identifier (peripheral);
-    char *peripheral_address = simpleble_peripheral_address (peripheral);
-    bool found = false;
-    if (!params.mac_address.empty ())
-    {
-        if (strcmp (peripheral_address, params.mac_address.c_str ()) == 0)
-        {
-            found = true;
-        }
-    }
-    else
-    {
-        if (!params.serial_number.empty ())
-        {
-            if (strcmp (peripheral_identified, params.serial_number.c_str ()) == 0)
-            {
-                found = true;
-            }
-        }
-        else
-        {
-            if ((strncmp (peripheral_identified, "MuseS", 5) == 0) ||
-                (strncmp (peripheral_identified, "MuseAthena", 10) == 0) ||
-                (strncmp (peripheral_identified, "Muse Athena", 11) == 0))
-            {
-                found = true;
-            }
-        }
-    }
-
-    safe_logger (spdlog::level::trace, "address {}", peripheral_address);
-    simpleble_free (peripheral_address);
-    safe_logger (spdlog::level::trace, "identifier {}", peripheral_identified);
-    simpleble_free (peripheral_identified);
-
-    if (found)
-    {
-        {
-            std::lock_guard<std::mutex> lk (m);
-            muse_peripheral = peripheral;
-        }
-        cv.notify_one ();
-    }
-    else
-    {
-        simpleble_peripheral_release_handle (peripheral);
-    }
+    return (strncmp (identifier, "MuseS", 5) == 0) ||
+        (strncmp (identifier, "MuseAthena", 10) == 0) ||
+        (strncmp (identifier, "Muse Athena", 11) == 0);
 }
 
 void MuseAthena::peripheral_on_data (simpleble_peripheral_t peripheral, simpleble_uuid_t service,

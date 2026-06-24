@@ -12,12 +12,6 @@
 #define BRAINALIVE_NOTIFY_CHAR "0000fe42-8e22-4541-9d4c-21edae82ed19"
 
 
-static void brainalive_adapter_1_on_scan_found (
-    simpleble_adapter_t adapter, simpleble_peripheral_t peripheral, void *board)
-{
-    ((BrainAlive *)(board))->adapter_1_on_scan_found (adapter, peripheral);
-}
-
 static void brainalive_read_notifications (simpleble_peripheral_t peripheral,
     simpleble_uuid_t service, simpleble_uuid_t characteristic, const uint8_t *data, size_t size,
     void *board)
@@ -38,9 +32,6 @@ static void brainalive_read_notifications (simpleble_peripheral_t peripheral,
 BrainAlive::BrainAlive (struct BrainFlowInputParams params)
     : BLELibBoard ((int)BoardIds::BRAINALIVE_BOARD, params)
 {
-    initialized = false;
-    brainalive_adapter = NULL;
-    brainalive_peripheral = NULL;
     is_streaming = false;
 }
 
@@ -50,158 +41,68 @@ BrainAlive::~BrainAlive ()
     release_session ();
 }
 
-int BrainAlive::prepare_session ()
+int BrainAlive::setup_session ()
 {
-    if (initialized)
-    {
-        safe_logger (spdlog::level::info, "Session is already prepared");
-        return (int)BrainFlowExitCodes::STATUS_OK;
-    }
-    if (params.timeout < 1)
-    {
-        params.timeout = 5;
-    }
-    safe_logger (spdlog::level::info, "Use timeout for discovery: {}", params.timeout);
-    if (!init_dll_loader ())
-    {
-        safe_logger (spdlog::level::err, "Failed to init dll_loader");
-        return (int)BrainFlowExitCodes::GENERAL_ERROR;
-    }
-    size_t adapter_count = simpleble_adapter_get_count ();
-    if (adapter_count == 0)
-    {
-        safe_logger (spdlog::level::err, "No BLE adapters found");
-        return (int)BrainFlowExitCodes::UNABLE_TO_OPEN_PORT_ERROR;
-    }
-
-    brainalive_adapter = simpleble_adapter_get_handle (0);
-    if (brainalive_adapter == NULL)
-    {
-        safe_logger (spdlog::level::err, "Adapter is NULL");
-        return (int)BrainFlowExitCodes::UNABLE_TO_OPEN_PORT_ERROR;
-    }
-
-    simpleble_adapter_set_callback_on_scan_found (
-        brainalive_adapter, ::brainalive_adapter_1_on_scan_found, (void *)this);
-
-    if (!simpleble_adapter_is_bluetooth_enabled ())
-    {
-        safe_logger (spdlog::level::warn, "Probably bluetooth is disabled.");
-        // dont throw an exception because of this
-        // https://github.com/OpenBluetoothToolbox/SimpleBLE/issues/115
-    }
-
-    simpleble_adapter_scan_start (brainalive_adapter);
     int res = (int)BrainFlowExitCodes::STATUS_OK;
-    std::unique_lock<std::mutex> lk (m);
-    auto sec = std::chrono::seconds (1);
-    if (cv.wait_for (
-            lk, params.timeout * sec, [this] { return this->brainalive_peripheral != NULL; }))
-    {
-        safe_logger (spdlog::level::info, "Found BrainAlive device");
-    }
-    else
-    {
-        safe_logger (spdlog::level::err, "Failed to find BrainAlive Device");
-        res = (int)BrainFlowExitCodes::BOARD_NOT_READY_ERROR;
-    }
-    simpleble_adapter_scan_stop (brainalive_adapter);
-    if (res == (int)BrainFlowExitCodes::STATUS_OK)
-    {
-        // for safety
-        for (int i = 0; i < 3; i++)
-        {
-            if (simpleble_peripheral_connect (brainalive_peripheral) == SIMPLEBLE_SUCCESS)
-            {
-                safe_logger (spdlog::level::info, "Connected to BrainAlive Device");
-                res = (int)BrainFlowExitCodes::STATUS_OK;
-
-                break;
-            }
-            else
-            {
-                safe_logger (
-                    spdlog::level::warn, "Failed to connect to BrainAlive Device: {}/3", i);
-                res = (int)BrainFlowExitCodes::BOARD_NOT_READY_ERROR;
-#ifdef _WIN32
-                Sleep (1000);
-#else
-                sleep (1);
-#endif
-            }
-        }
-    }
-    else
-    {
-// https://github.com/OpenBluetoothToolbox/SimpleBLE/issues/26#issuecomment-955606799
-#ifdef __linux__
-        usleep (1000000);
-#endif
-    }
-
     bool control_characteristics_found = false;
 
-    if (res == (int)BrainFlowExitCodes::STATUS_OK)
+    size_t services_count = simpleble_peripheral_services_count (target_peripheral);
+    for (size_t i = 0; i < services_count; i++)
     {
-        size_t services_count = simpleble_peripheral_services_count (brainalive_peripheral);
-        for (size_t i = 0; i < services_count; i++)
+        simpleble_service_t service;
+        if (simpleble_peripheral_services_get (target_peripheral, i, &service) !=
+            SIMPLEBLE_SUCCESS)
         {
-            simpleble_service_t service;
-            if (simpleble_peripheral_services_get (brainalive_peripheral, i, &service) !=
-                SIMPLEBLE_SUCCESS)
+            safe_logger (spdlog::level::err, "failed to get service");
+            res = (int)BrainFlowExitCodes::BOARD_NOT_READY_ERROR;
+        }
+
+        safe_logger (spdlog::level::trace, "found servce {}", service.uuid.value);
+        for (size_t j = 0; j < service.characteristic_count; j++)
+        {
+            safe_logger (spdlog::level::trace, "found characteristic {}",
+                service.characteristics[j].uuid.value);
+
+            if (strcmp (service.characteristics[j].uuid.value,
+                    BRAINALIVE_WRITE_CHAR) == 0) // Write Characteristics
             {
-                safe_logger (spdlog::level::err, "failed to get service");
-                res = (int)BrainFlowExitCodes::BOARD_NOT_READY_ERROR;
+                write_characteristics = std::pair<simpleble_uuid_t, simpleble_uuid_t> (
+                    service.uuid, service.characteristics[j].uuid);
+                control_characteristics_found = true;
+                safe_logger (spdlog::level::info, "found control characteristic");
             }
-
-            safe_logger (spdlog::level::trace, "found servce {}", service.uuid.value);
-            for (size_t j = 0; j < service.characteristic_count; j++)
+            if (strcmp (service.characteristics[j].uuid.value,
+                    BRAINALIVE_NOTIFY_CHAR) == 0) // Notification Characteristics
             {
-                safe_logger (spdlog::level::trace, "found characteristic {}",
-                    service.characteristics[j].uuid.value);
-
-                if (strcmp (service.characteristics[j].uuid.value,
-                        BRAINALIVE_WRITE_CHAR) == 0) // Write Characteristics
+                if (simpleble_peripheral_notify (target_peripheral, service.uuid,
+                        service.characteristics[j].uuid, ::brainalive_read_notifications,
+                        (void *)this) == SIMPLEBLE_SUCCESS)
                 {
-                    write_characteristics = std::pair<simpleble_uuid_t, simpleble_uuid_t> (
+
+                    notified_characteristics = std::pair<simpleble_uuid_t, simpleble_uuid_t> (
                         service.uuid, service.characteristics[j].uuid);
-                    control_characteristics_found = true;
-                    safe_logger (spdlog::level::info, "found control characteristic");
                 }
-                if (strcmp (service.characteristics[j].uuid.value,
-                        BRAINALIVE_NOTIFY_CHAR) == 0) // Notification Characteristics
+                else
                 {
-                    if (simpleble_peripheral_notify (brainalive_peripheral, service.uuid,
-                            service.characteristics[j].uuid, ::brainalive_read_notifications,
-                            (void *)this) == SIMPLEBLE_SUCCESS)
-                    {
-
-                        notified_characteristics = std::pair<simpleble_uuid_t, simpleble_uuid_t> (
-                            service.uuid, service.characteristics[j].uuid);
-                    }
-                    else
-                    {
-                        safe_logger (spdlog::level::err, "Failed to notify for {} {}",
-                            service.uuid.value, service.characteristics[j].uuid.value);
-                        res = (int)BrainFlowExitCodes::GENERAL_ERROR;
-                    }
+                    safe_logger (spdlog::level::err, "Failed to notify for {} {}",
+                        service.uuid.value, service.characteristics[j].uuid.value);
+                    res = (int)BrainFlowExitCodes::GENERAL_ERROR;
                 }
             }
         }
     }
 
-    if ((res == (int)BrainFlowExitCodes::STATUS_OK) && (control_characteristics_found))
+    if ((res == (int)BrainFlowExitCodes::STATUS_OK) && control_characteristics_found)
     {
-        initialized = true;
         res = config_board ("0a036007000d");
         if (res == (int)BrainFlowExitCodes::STATUS_OK)
             safe_logger (spdlog::level::debug, "Get config command send");
         else
             safe_logger (spdlog::level::debug, "Failed to send get config command");
     }
-    else
+    else if (res == (int)BrainFlowExitCodes::STATUS_OK)
     {
-        release_session ();
+        res = (int)BrainFlowExitCodes::BOARD_NOT_READY_ERROR;
     }
     return res;
 }
@@ -229,7 +130,7 @@ int BrainAlive::start_stream (int buffer_size, const char *streamer_params)
 
 int BrainAlive::stop_stream ()
 {
-    if (brainalive_peripheral == NULL)
+    if (target_peripheral == NULL)
     {
         return (int)BrainFlowExitCodes::BOARD_NOT_CREATED_ERROR;
     }
@@ -261,7 +162,7 @@ int BrainAlive::release_session ()
 #else
             sleep (2);
 #endif
-            if (simpleble_peripheral_unsubscribe (brainalive_peripheral,
+            if (simpleble_peripheral_unsubscribe (target_peripheral,
                     notified_characteristics.first,
                     notified_characteristics.second) != SIMPLEBLE_SUCCESS)
             {
@@ -276,25 +177,7 @@ int BrainAlive::release_session ()
         free_packages ();
         initialized = false;
     }
-    if (brainalive_peripheral != NULL)
-    {
-        bool is_connected = false;
-        if (simpleble_peripheral_is_connected (brainalive_peripheral, &is_connected) ==
-            SIMPLEBLE_SUCCESS)
-        {
-            if (is_connected)
-            {
-                simpleble_peripheral_disconnect (brainalive_peripheral);
-            }
-        }
-        simpleble_peripheral_release_handle (brainalive_peripheral);
-        brainalive_peripheral = NULL;
-    }
-    if (brainalive_adapter != NULL)
-    {
-        simpleble_adapter_release_handle (brainalive_adapter);
-        brainalive_adapter = NULL;
-    }
+    release_peripheral ();
 
     return (int)BrainFlowExitCodes::STATUS_OK;
 }
@@ -321,7 +204,7 @@ int BrainAlive::config_board (std::string config)
             static_cast<unsigned char> (std::stoul (byte_string, nullptr, 16)); // Convert to byte
     }
 
-    if (simpleble_peripheral_write_command (brainalive_peripheral, write_characteristics.first,
+    if (simpleble_peripheral_write_command (target_peripheral, write_characteristics.first,
             write_characteristics.second, byte_array.data (),
             sizeof (byte_array)) != SIMPLEBLE_SUCCESS)
     {
@@ -331,54 +214,9 @@ int BrainAlive::config_board (std::string config)
     return (int)BrainFlowExitCodes::STATUS_OK;
 }
 
-void BrainAlive::adapter_1_on_scan_found (
-    simpleble_adapter_t adapter, simpleble_peripheral_t peripheral)
+bool BrainAlive::matches_target_name (const char *identifier)
 {
-    char *peripheral_identified = simpleble_peripheral_identifier (peripheral);
-    char *peripheral_address = simpleble_peripheral_address (peripheral);
-    bool found = false;
-    if (!params.mac_address.empty ())
-    {
-        if (strcmp (peripheral_address, params.mac_address.c_str ()) == 0)
-        {
-            found = true;
-        }
-    }
-    else
-    {
-        if (!params.serial_number.empty ())
-        {
-            if (strcmp (peripheral_identified, params.serial_number.c_str ()) == 0)
-            {
-                found = true;
-            }
-        }
-        else
-        {
-            if (strncmp (peripheral_identified, "BA_FLEX", 7) == 0)
-            {
-                found = true;
-            }
-        }
-    }
-
-    safe_logger (spdlog::level::trace, "address {}", peripheral_address);
-    simpleble_free (peripheral_address);
-    safe_logger (spdlog::level::trace, "identifier {}", peripheral_identified);
-    simpleble_free (peripheral_identified);
-
-    if (found)
-    {
-        {
-            std::lock_guard<std::mutex> lk (m);
-            brainalive_peripheral = peripheral;
-        }
-        cv.notify_one ();
-    }
-    else
-    {
-        simpleble_peripheral_release_handle (peripheral);
-    }
+    return strncmp (identifier, "BA_FLEX", 7) == 0;
 }
 
 void BrainAlive::read_data (simpleble_uuid_t service, simpleble_uuid_t characteristic,

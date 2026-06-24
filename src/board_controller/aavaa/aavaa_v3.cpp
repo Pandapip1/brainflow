@@ -12,22 +12,6 @@
 #define AAVAA3_NOTIFY_CHAR "6e400003-c352-11e5-953d-0002a5d5c51b"
 
 
-void aavaa_adapter_1_on_scan_start (simpleble_adapter_t adapter, void *board)
-{
-    ((AAVAAv3 *)(board))->adapter_1_on_scan_start (adapter);
-}
-
-void aavaa_adapter_1_on_scan_stop (simpleble_adapter_t adapter, void *board)
-{
-    ((AAVAAv3 *)(board))->adapter_1_on_scan_stop (adapter);
-}
-
-void aavaa_adapter_1_on_scan_found (
-    simpleble_adapter_t adapter, simpleble_peripheral_t peripheral, void *board)
-{
-    ((AAVAAv3 *)(board))->adapter_1_on_scan_found (adapter, peripheral);
-}
-
 void aavaa_read_notifications (simpleble_peripheral_t handle, simpleble_uuid_t service,
     simpleble_uuid_t characteristic, const uint8_t *data, size_t size, void *board)
 {
@@ -37,9 +21,6 @@ void aavaa_read_notifications (simpleble_peripheral_t handle, simpleble_uuid_t s
 AAVAAv3::AAVAAv3 (struct BrainFlowInputParams params)
     : BLELibBoard ((int)BoardIds::AAVAA_V3_BOARD, params)
 {
-    initialized = false;
-    aavaa_adapter = NULL;
-    aavaa_peripheral = NULL;
     is_streaming = false;
     start_command = "\x01\x62";
     stop_command = "\x01\x39";
@@ -51,164 +32,74 @@ AAVAAv3::~AAVAAv3 ()
     release_session ();
 }
 
-int AAVAAv3::prepare_session ()
+void AAVAAv3::before_discover ()
 {
-    if (initialized)
-    {
-        safe_logger (spdlog::level::info, "Session is already prepared");
-        return (int)BrainFlowExitCodes::STATUS_OK;
-    }
-    if (params.timeout < 1)
-    {
-        params.timeout = 5;
-    }
-    safe_logger (spdlog::level::info, "Use timeout for discovery: {}", params.timeout);
-    if (!init_dll_loader ())
-    {
-        safe_logger (spdlog::level::err, "Failed to init dll_loader");
-        return (int)BrainFlowExitCodes::GENERAL_ERROR;
-    }
-    size_t adapter_count = simpleble_adapter_get_count ();
-    if (adapter_count == 0)
-    {
-        safe_logger (spdlog::level::err, "No BLE adapters found");
-        return (int)BrainFlowExitCodes::UNABLE_TO_OPEN_PORT_ERROR;
-    }
+#ifdef _WIN32
+    Sleep (1000);
+#else
+    sleep (1);
+#endif
+}
 
-    aavaa_adapter = simpleble_adapter_get_handle (0);
-    if (aavaa_adapter == NULL)
-    {
-        safe_logger (spdlog::level::err, "Adapter is NULL");
-        return (int)BrainFlowExitCodes::UNABLE_TO_OPEN_PORT_ERROR;
-    }
-
-    simpleble_adapter_set_callback_on_scan_start (
-        aavaa_adapter, ::aavaa_adapter_1_on_scan_start, (void *)this);
-    simpleble_adapter_set_callback_on_scan_stop (
-        aavaa_adapter, ::aavaa_adapter_1_on_scan_stop, (void *)this);
-    simpleble_adapter_set_callback_on_scan_found (
-        aavaa_adapter, ::aavaa_adapter_1_on_scan_found, (void *)this);
-
+int AAVAAv3::setup_session ()
+{
 #ifdef _WIN32
     Sleep (1000);
 #else
     sleep (1);
 #endif
 
-    if (!simpleble_adapter_is_bluetooth_enabled ())
-    {
-        safe_logger (spdlog::level::warn, "Probably bluetooth is disabled.");
-        // dont throw an exception because of this
-        // https://github.com/OpenBluetoothToolbox/SimpleBLE/issues/115
-    }
-
-    simpleble_adapter_scan_start (aavaa_adapter);
     int res = (int)BrainFlowExitCodes::STATUS_OK;
-    std::unique_lock<std::mutex> lk (m);
-    auto sec = std::chrono::seconds (1);
-    if (cv.wait_for (lk, params.timeout * sec, [this] { return this->aavaa_peripheral != NULL; }))
-    {
-        safe_logger (spdlog::level::info, "Found AAVAAv3 device");
-    }
-    else
-    {
-        safe_logger (spdlog::level::err, "Failed to find AAVAAv3 Device");
-        res = (int)BrainFlowExitCodes::BOARD_NOT_READY_ERROR;
-    }
-    simpleble_adapter_scan_stop (aavaa_adapter);
-    if (res == (int)BrainFlowExitCodes::STATUS_OK)
-    {
-#ifdef _WIN32
-        Sleep (1000);
-#else
-        sleep (1);
-#endif
-        // for safety
-        for (int i = 0; i < 3; i++)
-        {
-            if (simpleble_peripheral_connect (aavaa_peripheral) == SIMPLEBLE_SUCCESS)
-            {
-                safe_logger (spdlog::level::info, "Connected to AAVAAv3 Device");
-                res = (int)BrainFlowExitCodes::STATUS_OK;
-                break;
-            }
-            else
-            {
-                safe_logger (spdlog::level::err, "Failed to connect to AAVAAv3 Device");
-                res = (int)BrainFlowExitCodes::BOARD_NOT_READY_ERROR;
-#ifdef _WIN32
-                Sleep (1000);
-#else
-                sleep (1);
-#endif
-            }
-        }
-    }
-    else
-    {
-// https://github.com/OpenBluetoothToolbox/SimpleBLE/issues/26#issuecomment-955606799
-#ifdef __linux__
-        usleep (1000000);
-#endif
-    }
-
     int num_chars_found = 0;
 
-    if (res == (int)BrainFlowExitCodes::STATUS_OK)
+    size_t services_count = simpleble_peripheral_services_count (target_peripheral);
+    for (size_t i = 0; i < services_count; i++)
     {
-        size_t services_count = simpleble_peripheral_services_count (aavaa_peripheral);
-        for (size_t i = 0; i < services_count; i++)
+        simpleble_service_t service;
+        if (simpleble_peripheral_services_get (target_peripheral, i, &service) !=
+            SIMPLEBLE_SUCCESS)
         {
-            simpleble_service_t service;
-            if (simpleble_peripheral_services_get (aavaa_peripheral, i, &service) !=
-                SIMPLEBLE_SUCCESS)
+            safe_logger (spdlog::level::err, "failed to get service");
+            res = (int)BrainFlowExitCodes::BOARD_NOT_READY_ERROR;
+        }
+
+        safe_logger (spdlog::level::trace, "found servce {}", service.uuid.value);
+        for (size_t j = 0; j < service.characteristic_count; j++)
+        {
+            safe_logger (spdlog::level::trace, "found characteristic {}",
+                service.characteristics[j].uuid.value);
+
+            if (strcmp (service.characteristics[j].uuid.value,
+                    AAVAA3_WRITE_CHAR) == 0) // Write Characteristics
             {
-                safe_logger (spdlog::level::err, "failed to get service");
-                res = (int)BrainFlowExitCodes::BOARD_NOT_READY_ERROR;
+                write_characteristics = std::pair<simpleble_uuid_t, simpleble_uuid_t> (
+                    service.uuid, service.characteristics[j].uuid);
+                num_chars_found++;
             }
-
-            safe_logger (spdlog::level::trace, "found servce {}", service.uuid.value);
-            for (size_t j = 0; j < service.characteristic_count; j++)
+            if (strcmp (service.characteristics[j].uuid.value,
+                    AAVAA3_NOTIFY_CHAR) == 0) // Notification Characteristics
             {
-                safe_logger (spdlog::level::trace, "found characteristic {}",
-                    service.characteristics[j].uuid.value);
-
-                if (strcmp (service.characteristics[j].uuid.value,
-                        AAVAA3_WRITE_CHAR) == 0) // Write Characteristics
+                if (simpleble_peripheral_notify (target_peripheral, service.uuid,
+                        service.characteristics[j].uuid, ::aavaa_read_notifications,
+                        (void *)this) == SIMPLEBLE_SUCCESS)
                 {
-                    write_characteristics = std::pair<simpleble_uuid_t, simpleble_uuid_t> (
+                    notified_characteristics = std::pair<simpleble_uuid_t, simpleble_uuid_t> (
                         service.uuid, service.characteristics[j].uuid);
                     num_chars_found++;
                 }
-                if (strcmp (service.characteristics[j].uuid.value,
-                        AAVAA3_NOTIFY_CHAR) == 0) // Notification Characteristics
+                else
                 {
-                    if (simpleble_peripheral_notify (aavaa_peripheral, service.uuid,
-                            service.characteristics[j].uuid, ::aavaa_read_notifications,
-                            (void *)this) == SIMPLEBLE_SUCCESS)
-                    {
-                        notified_characteristics = std::pair<simpleble_uuid_t, simpleble_uuid_t> (
-                            service.uuid, service.characteristics[j].uuid);
-                        num_chars_found++;
-                    }
-                    else
-                    {
-                        safe_logger (spdlog::level::err, "Failed to notify for {} {}",
-                            service.uuid.value, service.characteristics[j].uuid.value);
-                        res = (int)BrainFlowExitCodes::GENERAL_ERROR;
-                    }
+                    safe_logger (spdlog::level::err, "Failed to notify for {} {}",
+                        service.uuid.value, service.characteristics[j].uuid.value);
+                    res = (int)BrainFlowExitCodes::GENERAL_ERROR;
                 }
             }
         }
     }
 
-    if ((res == (int)BrainFlowExitCodes::STATUS_OK) && (num_chars_found == 2))
+    if ((res == (int)BrainFlowExitCodes::STATUS_OK) && (num_chars_found != 2))
     {
-        initialized = true;
-    }
-    else
-    {
-        release_session ();
+        res = (int)BrainFlowExitCodes::BOARD_NOT_READY_ERROR;
     }
     return res;
 }
@@ -239,7 +130,7 @@ int AAVAAv3::start_stream (int buffer_size, const char *streamer_params)
 
 int AAVAAv3::stop_stream ()
 {
-    if (aavaa_peripheral == NULL)
+    if (target_peripheral == NULL)
     {
         return (int)BrainFlowExitCodes::BOARD_NOT_CREATED_ERROR;
     }
@@ -271,7 +162,7 @@ int AAVAAv3::release_session ()
 #else
             sleep (1);
 #endif
-            if (simpleble_peripheral_unsubscribe (aavaa_peripheral, notified_characteristics.first,
+            if (simpleble_peripheral_unsubscribe (target_peripheral, notified_characteristics.first,
                     notified_characteristics.second) != SIMPLEBLE_SUCCESS)
             {
                 safe_logger (spdlog::level::err, "failed to unsubscribe for {} {}",
@@ -287,27 +178,7 @@ int AAVAAv3::release_session ()
         free_packages ();
         initialized = false;
     }
-    if (aavaa_peripheral != NULL)
-    {
-        safe_logger (spdlog::level::info, "peripheral is not NULL.");
-        bool is_connected = false;
-        if (simpleble_peripheral_is_connected (aavaa_peripheral, &is_connected) ==
-            SIMPLEBLE_SUCCESS)
-        {
-            if (is_connected)
-            {
-                simpleble_peripheral_disconnect (aavaa_peripheral);
-            }
-        }
-        simpleble_peripheral_release_handle (aavaa_peripheral);
-        aavaa_peripheral = NULL;
-    }
-    if (aavaa_adapter != NULL)
-    {
-        safe_logger (spdlog::level::info, "adapter is not NULL.");
-        simpleble_adapter_release_handle (aavaa_adapter);
-        aavaa_adapter = NULL;
-    }
+    release_peripheral ();
     safe_logger (spdlog::level::trace, "released successfully.");
     return (int)BrainFlowExitCodes::STATUS_OK;
 }
@@ -392,7 +263,7 @@ int AAVAAv3::send_command (std::string config)
     }
     uint8_t *command = new uint8_t[config.size ()];
     memcpy (command, config.c_str (), config.size ());
-    if (simpleble_peripheral_write_command (aavaa_peripheral, write_characteristics.first,
+    if (simpleble_peripheral_write_command (target_peripheral, write_characteristics.first,
             write_characteristics.second, command, config.size ()) != SIMPLEBLE_SUCCESS)
     {
         safe_logger (spdlog::level::err, "failed to send command {} to device", config.c_str ());
@@ -408,64 +279,9 @@ int AAVAAv3::send_command (std::string config)
     return (int)BrainFlowExitCodes::STATUS_OK;
 }
 
-void AAVAAv3::adapter_1_on_scan_start (simpleble_adapter_t adapter)
+bool AAVAAv3::matches_target_name (const char *identifier)
 {
-    safe_logger (spdlog::level::trace, "Scan started");
-}
-
-void AAVAAv3::adapter_1_on_scan_stop (simpleble_adapter_t adapter)
-{
-    safe_logger (spdlog::level::trace, "Scan stopped");
-}
-
-void AAVAAv3::adapter_1_on_scan_found (
-    simpleble_adapter_t adapter, simpleble_peripheral_t peripheral)
-{
-    char *peripheral_identified = simpleble_peripheral_identifier (peripheral);
-    char *peripheral_address = simpleble_peripheral_address (peripheral);
-    bool found = false;
-    if (!params.mac_address.empty ())
-    {
-        if (strcmp (peripheral_address, params.mac_address.c_str ()) == 0)
-        {
-            found = true;
-        }
-    }
-    else
-    {
-        if (!params.serial_number.empty ())
-        {
-            if (strcmp (peripheral_identified, params.serial_number.c_str ()) == 0)
-            {
-                found = true;
-            }
-        }
-        else
-        {
-            if (strncmp (peripheral_identified, "AAVAAv3", 8) == 0)
-            {
-                found = true;
-            }
-        }
-    }
-
-    safe_logger (spdlog::level::trace, "address {}", peripheral_address);
-    simpleble_free (peripheral_address);
-    safe_logger (spdlog::level::trace, "identifier {}", peripheral_identified);
-    simpleble_free (peripheral_identified);
-
-    if (found)
-    {
-        {
-            std::lock_guard<std::mutex> lk (m);
-            aavaa_peripheral = peripheral;
-        }
-        cv.notify_one ();
-    }
-    else
-    {
-        simpleble_peripheral_release_handle (peripheral);
-    }
+    return strncmp (identifier, "AAVAAv3", 8) == 0;
 }
 
 void AAVAAv3::read_data (

@@ -5,12 +5,13 @@
 
 #include "board.h"
 #include "board_controller.h"
+#include "hw_prober.h"
 #include "socket_server_tcp.h"
 
 
 struct http_t; // forward declaration cause include "http.h" here leads to strange errors
 
-class OpenBCIWifiShieldBoard : public Board
+class OpenBCIWifiShieldBoard : public Board, public HWProber
 {
 
 protected:
@@ -39,6 +40,10 @@ public:
     int release_session () override;
     int config_board (std::string config, std::string &response) override;
     int get_board_sampling_rate (int preset) override;
+
+    // HWProber
+    bool find_already_connected () override;
+    bool discover (int timeout_sec) override;
 
     static constexpr int package_size = 33;
 };

@@ -10,11 +10,14 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <thread>
 #include <string.h>
 #include <string>
 #include <utility>
 
 #include "aavaa_v3.h"
+#include "ble_lib_board.h"
+#include "hw_prober.h"
 #include "ant_neuro.h"
 #include "biolistener.h"
 #include "board.h"
@@ -629,6 +632,101 @@ int delete_streamer (
     }
     auto board_it = boards.find (key);
     return board_it->second->delete_streamer (streamer, preset);
+}
+
+int scan_boards (int timeout_sec, char *result_json, int *result_json_len, int max_len)
+{
+    if ((result_json == NULL) || (result_json_len == NULL) || (max_len < 1))
+    {
+        return (int)BrainFlowExitCodes::INVALID_ARGUMENTS_ERROR;
+    }
+
+    BrainFlowInputParams empty;
+    std::vector<int> found_ids;
+    std::mutex found_mutex;
+
+    // BLE: all board types probe concurrently — BLELibBoard now manages the shared adapter
+    // scan internally (starts on the first discover() caller, stops on the last).
+    auto make_ble_prober = [&] (int id, std::shared_ptr<Board> board) {
+        return std::thread ([&found_ids, &found_mutex, timeout_sec, id, board] () {
+            auto *prober = dynamic_cast<HWProber *> (board.get ());
+            if (prober != NULL &&
+                (prober->find_already_connected () || prober->discover (timeout_sec)))
+            {
+                std::lock_guard<std::mutex> lk (found_mutex);
+                found_ids.push_back (id);
+            }
+        });
+    };
+
+    if (BLELibBoard::ensure_adapter ())
+    {
+        threads.push_back (make_ble_prober ((int)BoardIds::MUSE_2_BOARD,
+            std::make_shared<Muse> ((int)BoardIds::MUSE_2_BOARD, empty)));
+        threads.push_back (make_ble_prober ((int)BoardIds::MUSE_S_BOARD,
+            std::make_shared<Muse> ((int)BoardIds::MUSE_S_BOARD, empty)));
+        threads.push_back (make_ble_prober ((int)BoardIds::MUSE_2016_BOARD,
+            std::make_shared<Muse> ((int)BoardIds::MUSE_2016_BOARD, empty)));
+        threads.push_back (make_ble_prober ((int)BoardIds::MUSE_S_ATHENA_BOARD,
+            std::make_shared<MuseAthena> ((int)BoardIds::MUSE_S_ATHENA_BOARD, empty)));
+        threads.push_back (make_ble_prober (
+            (int)BoardIds::BRAINALIVE_BOARD, std::make_shared<BrainAlive> (empty)));
+        threads.push_back (make_ble_prober (
+            (int)BoardIds::AAVAA_V3_BOARD, std::make_shared<AAVAAv3> (empty)));
+        threads.push_back (make_ble_prober (
+            (int)BoardIds::GANGLION_NATIVE_BOARD, std::make_shared<GanglionNative> (empty)));
+    }
+
+    // Classic BT: probe sequentially in one thread (inquiry scan is device-global).
+    auto bt_task = [&] () {
+        std::vector<std::pair<int, std::shared_ptr<Board>>> bt_boards = {
+            {(int)BoardIds::ENOPHONE_BOARD, std::make_shared<Enophone> (empty)},
+            {(int)BoardIds::EXPLORE_4_CHAN_BOARD, std::make_shared<Explore> ((int)BoardIds::EXPLORE_4_CHAN_BOARD, empty)},
+            {(int)BoardIds::EXPLORE_8_CHAN_BOARD, std::make_shared<Explore> ((int)BoardIds::EXPLORE_8_CHAN_BOARD, empty)},
+            {(int)BoardIds::EXPLORE_PLUS_8_CHAN_BOARD, std::make_shared<Explore> ((int)BoardIds::EXPLORE_PLUS_8_CHAN_BOARD, empty)},
+            {(int)BoardIds::EXPLORE_PLUS_32_CHAN_BOARD, std::make_shared<Explore> ((int)BoardIds::EXPLORE_PLUS_32_CHAN_BOARD, empty)},
+        };
+        for (auto &entry : bt_boards)
+        {
+            auto *prober = dynamic_cast<HWProber *> (entry.second.get ());
+            if (prober != NULL &&
+                (prober->find_already_connected () || prober->discover (timeout_sec)))
+            {
+                std::lock_guard<std::mutex> lk (found_mutex);
+                found_ids.push_back (entry.first);
+            }
+        }
+    };
+
+    // Wi-Fi: all OpenBCI shield variants share the same SSDP discovery. Run one probe and
+    // report every board ID that can ride that shield if a shield is found.
+    auto wifi_task = [&] () {
+        GanglionWifi probe (empty);
+        auto *prober = dynamic_cast<HWProber *> (&probe);
+        if (prober != NULL && (prober->find_already_connected () || prober->discover (timeout_sec)))
+        {
+            std::lock_guard<std::mutex> lk (found_mutex);
+            found_ids.push_back ((int)BoardIds::GANGLION_WIFI_BOARD);
+            found_ids.push_back ((int)BoardIds::CYTON_WIFI_BOARD);
+            found_ids.push_back ((int)BoardIds::CYTON_DAISY_WIFI_BOARD);
+        }
+    };
+
+    threads.emplace_back (bt_task);
+    threads.emplace_back (wifi_task);
+    for (auto &t : threads)
+        t.join ();
+
+    std::string json = "[";
+    for (size_t i = 0; i < found_ids.size (); i++)
+    {
+        if (i > 0)
+            json += ",";
+        json += "{\"board_id\":" + std::to_string (found_ids[i]) + "}";
+    }
+    json += "]";
+
+    return copy_string_to_buffer (json, result_json, result_json_len, max_len);
 }
 
 int release_all_sessions ()

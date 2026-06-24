@@ -85,7 +85,6 @@ public:
     GanglionNative (struct BrainFlowInputParams params);
     ~GanglionNative () override;
 
-    int prepare_session () override;
     int start_stream (int buffer_size, const char *streamer_params) override;
     int stop_stream () override;
     int release_session () override;
@@ -94,20 +93,16 @@ public:
     int get_board_sampling_rate (int preset) override;
     int send_command (std::string config);
 
-    void adapter_1_on_scan_start (simpleble_adapter_t adapter);
-    void adapter_1_on_scan_stop (simpleble_adapter_t adapter);
-    void adapter_1_on_scan_found (simpleble_adapter_t adapter, simpleble_peripheral_t peripheral);
     void read_data (simpleble_uuid_t service, simpleble_uuid_t characteristic, const uint8_t *data,
         size_t size);
 
 protected:
-    volatile simpleble_adapter_t ganglion_adapter;
-    volatile simpleble_peripheral_t ganglion_peripheral;
-    bool initialized;
+    void before_discover () override;
+    int setup_session () override;
+    bool matches_target_name (const char *identifier) override;
+
     bool is_streaming;
     uint8_t firmware;
-    std::mutex m;
-    std::condition_variable cv;
     std::pair<simpleble_uuid_t, simpleble_uuid_t> notified_characteristics;
     std::pair<simpleble_uuid_t, simpleble_uuid_t> write_characteristics;
     std::string start_command;

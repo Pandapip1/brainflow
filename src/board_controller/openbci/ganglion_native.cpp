@@ -11,22 +11,6 @@
 #define GANGLION_SOFTWARE_REVISION "00002a28-0000-1000-8000-00805f9b34fb"
 
 
-static void ganglion_adapter_1_on_scan_start (simpleble_adapter_t adapter, void *board)
-{
-    ((GanglionNative *)(board))->adapter_1_on_scan_start (adapter);
-}
-
-static void ganglion_adapter_1_on_scan_stop (simpleble_adapter_t adapter, void *board)
-{
-    ((GanglionNative *)(board))->adapter_1_on_scan_stop (adapter);
-}
-
-static void ganglion_adapter_1_on_scan_found (
-    simpleble_adapter_t adapter, simpleble_peripheral_t peripheral, void *board)
-{
-    ((GanglionNative *)(board))->adapter_1_on_scan_found (adapter, peripheral);
-}
-
 static void ganglion_read_notifications (simpleble_peripheral_t handle, simpleble_uuid_t service,
     simpleble_uuid_t characteristic, const uint8_t *data, size_t size, void *board)
 {
@@ -36,9 +20,6 @@ static void ganglion_read_notifications (simpleble_peripheral_t handle, simplebl
 GanglionNative::GanglionNative (struct BrainFlowInputParams params)
     : BLELibBoard ((int)BoardIds::GANGLION_NATIVE_BOARD, params)
 {
-    initialized = false;
-    ganglion_adapter = NULL;
-    ganglion_peripheral = NULL;
     is_streaming = false;
     start_command = "b";
     stop_command = "s";
@@ -71,171 +52,79 @@ int GanglionNative::get_firmware_from_params (BrainFlowInputParams &params)
     }
 }
 
-int GanglionNative::prepare_session ()
+void GanglionNative::before_discover ()
 {
-    if (initialized)
-    {
-        safe_logger (spdlog::level::info, "Session is already prepared");
-        return (int)BrainFlowExitCodes::STATUS_OK;
-    }
-    if (params.timeout < 1)
-    {
-        params.timeout = 5;
-    }
-    safe_logger (spdlog::level::info, "Use timeout for discovery: {}", params.timeout);
-    if (!init_dll_loader ())
-    {
-        safe_logger (spdlog::level::err, "Failed to init dll_loader");
-        return (int)BrainFlowExitCodes::GENERAL_ERROR;
-    }
-    size_t adapter_count = simpleble_adapter_get_count ();
-    if (adapter_count == 0)
-    {
-        safe_logger (spdlog::level::err, "No BLE adapters found");
-        return (int)BrainFlowExitCodes::UNABLE_TO_OPEN_PORT_ERROR;
-    }
-
-    ganglion_adapter = simpleble_adapter_get_handle (0);
-    if (ganglion_adapter == NULL)
-    {
-        safe_logger (spdlog::level::err, "Adapter is NULL");
-        return (int)BrainFlowExitCodes::UNABLE_TO_OPEN_PORT_ERROR;
-    }
-
-    simpleble_adapter_set_callback_on_scan_start (
-        ganglion_adapter, ::ganglion_adapter_1_on_scan_start, (void *)this);
-    simpleble_adapter_set_callback_on_scan_stop (
-        ganglion_adapter, ::ganglion_adapter_1_on_scan_stop, (void *)this);
-    simpleble_adapter_set_callback_on_scan_found (
-        ganglion_adapter, ::ganglion_adapter_1_on_scan_found, (void *)this);
-
 #ifdef _WIN32
     Sleep (1000);
 #else
     usleep (1000000);
 #endif
+}
 
-    if (!simpleble_adapter_is_bluetooth_enabled ())
-    {
-        safe_logger (spdlog::level::warn, "Probably bluetooth is disabled.");
-        // dont throw an exception because of this
-        // https://github.com/OpenBluetoothToolbox/SimpleBLE/issues/115
-    }
-
-    simpleble_adapter_scan_start (ganglion_adapter);
+int GanglionNative::setup_session ()
+{
     int res = (int)BrainFlowExitCodes::STATUS_OK;
-    std::unique_lock<std::mutex> lk (m);
-    auto sec = std::chrono::seconds (1);
-    if (cv.wait_for (
-            lk, params.timeout * sec, [this] { return this->ganglion_peripheral != NULL; }))
-    {
-        safe_logger (spdlog::level::info, "Found GanglionNative device");
-    }
-    else
-    {
-        safe_logger (spdlog::level::err, "Failed to find Ganglion Device");
-        res = (int)BrainFlowExitCodes::BOARD_NOT_READY_ERROR;
-    }
-    simpleble_adapter_scan_stop (ganglion_adapter);
-    if (res == (int)BrainFlowExitCodes::STATUS_OK)
-    {
-        // for safety
-        for (int i = 0; i < 3; i++)
-        {
-            if (simpleble_peripheral_connect (ganglion_peripheral) == SIMPLEBLE_SUCCESS)
-            {
-                safe_logger (spdlog::level::info, "Connected to Ganglion Device");
-                res = (int)BrainFlowExitCodes::STATUS_OK;
-                break;
-            }
-            else
-            {
-                safe_logger (spdlog::level::warn, "Failed to connect to Ganglion Device: {}/3", i);
-                res = (int)BrainFlowExitCodes::BOARD_NOT_READY_ERROR;
-#ifdef _WIN32
-                Sleep (1000);
-#else
-                sleep (1);
-#endif
-            }
-        }
-    }
-    else
-    {
-// https://github.com/OpenBluetoothToolbox/SimpleBLE/issues/26#issuecomment-955606799
-#ifdef __linux__
-        usleep (1000000);
-#endif
-    }
-
     int num_chars_found = 0;
 
-    if (res == (int)BrainFlowExitCodes::STATUS_OK)
+    size_t services_count = simpleble_peripheral_services_count (target_peripheral);
+    for (size_t i = 0; i < services_count; i++)
     {
-        size_t services_count = simpleble_peripheral_services_count (ganglion_peripheral);
-        for (size_t i = 0; i < services_count; i++)
+        simpleble_service_t service;
+        if (simpleble_peripheral_services_get (target_peripheral, i, &service) !=
+            SIMPLEBLE_SUCCESS)
         {
-            simpleble_service_t service;
-            if (simpleble_peripheral_services_get (ganglion_peripheral, i, &service) !=
-                SIMPLEBLE_SUCCESS)
+            safe_logger (spdlog::level::err, "failed to get service");
+            res = (int)BrainFlowExitCodes::BOARD_NOT_READY_ERROR;
+        }
+
+        safe_logger (spdlog::level::trace, "found service {}", service.uuid.value);
+        for (size_t j = 0; j < service.characteristic_count; j++)
+        {
+            // Read the software revision characteristic to get the firmware version
+            if (firmware == 0 &&
+                strcmp (service.characteristics[j].uuid.value, GANGLION_SOFTWARE_REVISION) == 0)
             {
-                safe_logger (spdlog::level::err, "failed to get service");
-                res = (int)BrainFlowExitCodes::BOARD_NOT_READY_ERROR;
+                uint8_t *data;
+                size_t data_length;
+                simpleble_peripheral_read (target_peripheral, service.uuid,
+                    service.characteristics[j].uuid, &data, &data_length);
+
+                // Data should be in the form x.x.x stored as ASCII values in the data buffer
+                firmware = (data[0] == '3') ? 3 : 2;
+                safe_logger (spdlog::level::info, "Detected firmware version {}", firmware);
             }
 
-            safe_logger (spdlog::level::trace, "found service {}", service.uuid.value);
-            for (size_t j = 0; j < service.characteristic_count; j++)
+            if (strcmp (service.characteristics[j].uuid.value,
+                    GANGLION_WRITE_CHAR) == 0) // Write Characteristics
             {
-                // Read the software revision characteristic to get the firmware version
-                if (firmware == 0 &&
-                    strcmp (service.characteristics[j].uuid.value, GANGLION_SOFTWARE_REVISION) == 0)
+                write_characteristics = std::pair<simpleble_uuid_t, simpleble_uuid_t> (
+                    service.uuid, service.characteristics[j].uuid);
+                num_chars_found++;
+            }
+            if (strcmp (service.characteristics[j].uuid.value,
+                    GANGLION_NOTIFY_CHAR) == 0) // Notification Characteristics
+            {
+                if (simpleble_peripheral_notify (target_peripheral, service.uuid,
+                        service.characteristics[j].uuid, ::ganglion_read_notifications,
+                        (void *)this) == SIMPLEBLE_SUCCESS)
                 {
-                    uint8_t *data;
-                    size_t data_length;
-                    simpleble_peripheral_read (ganglion_peripheral, service.uuid,
-                        service.characteristics[j].uuid, &data, &data_length);
-
-                    // Data should be in the form x.x.x stored as ASCII values in the data buffer
-                    firmware = (data[0] == '3') ? 3 : 2;
-                    safe_logger (spdlog::level::info, "Detected firmware version {}", firmware);
-                }
-
-                if (strcmp (service.characteristics[j].uuid.value,
-                        GANGLION_WRITE_CHAR) == 0) // Write Characteristics
-                {
-                    write_characteristics = std::pair<simpleble_uuid_t, simpleble_uuid_t> (
+                    notified_characteristics = std::pair<simpleble_uuid_t, simpleble_uuid_t> (
                         service.uuid, service.characteristics[j].uuid);
                     num_chars_found++;
                 }
-                if (strcmp (service.characteristics[j].uuid.value,
-                        GANGLION_NOTIFY_CHAR) == 0) // Notification Characteristics
+                else
                 {
-                    if (simpleble_peripheral_notify (ganglion_peripheral, service.uuid,
-                            service.characteristics[j].uuid, ::ganglion_read_notifications,
-                            (void *)this) == SIMPLEBLE_SUCCESS)
-                    {
-                        notified_characteristics = std::pair<simpleble_uuid_t, simpleble_uuid_t> (
-                            service.uuid, service.characteristics[j].uuid);
-                        num_chars_found++;
-                    }
-                    else
-                    {
-                        safe_logger (spdlog::level::err, "Failed to notify for {} {}",
-                            service.uuid.value, service.characteristics[j].uuid.value);
-                        res = (int)BrainFlowExitCodes::GENERAL_ERROR;
-                    }
+                    safe_logger (spdlog::level::err, "Failed to notify for {} {}",
+                        service.uuid.value, service.characteristics[j].uuid.value);
+                    res = (int)BrainFlowExitCodes::GENERAL_ERROR;
                 }
             }
         }
     }
 
-    if ((res == (int)BrainFlowExitCodes::STATUS_OK) && (num_chars_found == 2))
+    if ((res == (int)BrainFlowExitCodes::STATUS_OK) && (num_chars_found != 2))
     {
-        initialized = true;
-    }
-    else
-    {
-        release_session ();
+        res = (int)BrainFlowExitCodes::BOARD_NOT_READY_ERROR;
     }
     return res;
 }
@@ -266,7 +155,7 @@ int GanglionNative::start_stream (int buffer_size, const char *streamer_params)
 
 int GanglionNative::stop_stream ()
 {
-    if (ganglion_peripheral == NULL)
+    if (target_peripheral == NULL)
     {
         return (int)BrainFlowExitCodes::BOARD_NOT_CREATED_ERROR;
     }
@@ -298,7 +187,7 @@ int GanglionNative::release_session ()
 #else
             sleep (2);
 #endif
-            if (simpleble_peripheral_unsubscribe (ganglion_peripheral,
+            if (simpleble_peripheral_unsubscribe (target_peripheral,
                     notified_characteristics.first,
                     notified_characteristics.second) != SIMPLEBLE_SUCCESS)
             {
@@ -313,25 +202,7 @@ int GanglionNative::release_session ()
         free_packages ();
         initialized = false;
     }
-    if (ganglion_peripheral != NULL)
-    {
-        bool is_connected = false;
-        if (simpleble_peripheral_is_connected (ganglion_peripheral, &is_connected) ==
-            SIMPLEBLE_SUCCESS)
-        {
-            if (is_connected)
-            {
-                simpleble_peripheral_disconnect (ganglion_peripheral);
-            }
-        }
-        simpleble_peripheral_release_handle (ganglion_peripheral);
-        ganglion_peripheral = NULL;
-    }
-    if (ganglion_adapter != NULL)
-    {
-        simpleble_adapter_release_handle (ganglion_adapter);
-        ganglion_adapter = NULL;
-    }
+    release_peripheral ();
 
     return (int)BrainFlowExitCodes::STATUS_OK;
 }
@@ -431,7 +302,7 @@ int GanglionNative::send_command (std::string config)
     }
     uint8_t *command = new uint8_t[config.size ()];
     memcpy (command, config.c_str (), config.size ());
-    if (simpleble_peripheral_write_command (ganglion_peripheral, write_characteristics.first,
+    if (simpleble_peripheral_write_command (target_peripheral, write_characteristics.first,
             write_characteristics.second, command, config.size ()) != SIMPLEBLE_SUCCESS)
     {
         safe_logger (spdlog::level::err, "failed to send command {} to device", config.c_str ());
@@ -442,70 +313,11 @@ int GanglionNative::send_command (std::string config)
     return (int)BrainFlowExitCodes::STATUS_OK;
 }
 
-void GanglionNative::adapter_1_on_scan_start (simpleble_adapter_t adapter)
+bool GanglionNative::matches_target_name (const char *identifier)
 {
-    safe_logger (spdlog::level::trace, "Scan started");
-}
-
-void GanglionNative::adapter_1_on_scan_stop (simpleble_adapter_t adapter)
-{
-    safe_logger (spdlog::level::trace, "Scan stopped");
-}
-
-void GanglionNative::adapter_1_on_scan_found (
-    simpleble_adapter_t adapter, simpleble_peripheral_t peripheral)
-{
-    char *peripheral_identified = simpleble_peripheral_identifier (peripheral);
-    char *peripheral_address = simpleble_peripheral_address (peripheral);
-    bool found = false;
-
-    if (!params.mac_address.empty ())
-    {
-        if (strcmp (peripheral_address, params.mac_address.c_str ()) == 0)
-        {
-            found = true;
-        }
-    }
-    else
-    {
-        if (!params.serial_number.empty ())
-        {
-            if (strcmp (peripheral_identified, params.serial_number.c_str ()) == 0)
-            {
-                found = true;
-            }
-        }
-        else
-        {
-            if (strncmp (peripheral_identified, "Ganglion", 8) == 0)
-            {
-                found = true;
-            }
-            // for some reason device may send Simblee instead Ganglion name
-            else if (strncmp (peripheral_identified, "Simblee", 7) == 0)
-            {
-                found = true;
-            }
-        }
-    }
-
-    safe_logger (spdlog::level::trace, "address {}", peripheral_address);
-    simpleble_free (peripheral_address);
-    safe_logger (spdlog::level::trace, "identifier {}", peripheral_identified);
-    simpleble_free (peripheral_identified);
-
-    if (found)
-    {
-        {
-            std::lock_guard<std::mutex> lk (m);
-            ganglion_peripheral = peripheral;
-        }
-        cv.notify_one ();
-    }
-    else
-    {
-        simpleble_peripheral_release_handle (peripheral);
-    }
+    // for some reason device may send Simblee instead Ganglion name
+    return (strncmp (identifier, "Ganglion", 8) == 0) ||
+        (strncmp (identifier, "Simblee", 7) == 0);
 }
 
 void GanglionNative::read_data (

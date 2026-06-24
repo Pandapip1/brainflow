@@ -18,14 +18,12 @@ public:
     BrainAlive (struct BrainFlowInputParams params);
     ~BrainAlive () override;
 
-    int prepare_session () override;
     int start_stream (int buffer_size, const char *streamer_params) override;
     int stop_stream () override;
     int release_session () override;
     int config_board (std::string config, std::string &response) override;
     int config_board (std::string config);
 
-    void adapter_1_on_scan_found (simpleble_adapter_t adapter, simpleble_peripheral_t peripheral);
     void read_data (simpleble_uuid_t service, simpleble_uuid_t characteristic, const uint8_t *data,
         size_t size, int channel_num);
     void set_internal_gain (int gain)
@@ -86,12 +84,10 @@ public:
 
 
 protected:
-    volatile simpleble_adapter_t brainalive_adapter;
-    volatile simpleble_peripheral_t brainalive_peripheral;
-    bool initialized;
     bool is_streaming;
-    std::mutex m;
-    std::condition_variable cv;
     std::pair<simpleble_uuid_t, simpleble_uuid_t> notified_characteristics;
     std::pair<simpleble_uuid_t, simpleble_uuid_t> write_characteristics;
+
+    int setup_session () override;
+    bool matches_target_name (const char *identifier) override;
 };

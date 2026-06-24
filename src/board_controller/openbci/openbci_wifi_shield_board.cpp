@@ -36,9 +36,9 @@ int OpenBCIWifiShieldBoard::prepare_session ()
         safe_logger (spdlog::level::info, "Session already prepared");
         return (int)BrainFlowExitCodes::STATUS_OK;
     }
-    if (params.ip_address.empty ())
+    if (!find_already_connected ())
     {
-        params.ip_address = find_wifi_shield ();
+        discover (params.timeout);
     }
     if ((params.timeout > 0) && (params.timeout < 600))
     {
@@ -368,6 +368,30 @@ std::string OpenBCIWifiShieldBoard::find_wifi_shield ()
 
     safe_logger (spdlog::level::info, "use ip address {}", ip_address.c_str ());
     return ip_address;
+}
+
+bool OpenBCIWifiShieldBoard::find_already_connected ()
+{
+    // Unlike BLE, this transport has no separate "discovered vs connected" state to query: an
+    // IP address is all either concept ever amounts to here. If the caller already supplied
+    // one, there's nothing further to look up - this mirrors what prepare_session() already
+    // did before this existed (skip find_wifi_shield() entirely when params.ip_address is set).
+    return !params.ip_address.empty ();
+}
+
+bool OpenBCIWifiShieldBoard::discover (int timeout_sec)
+{
+    // find_wifi_shield()'s SSDP M-SEARCH uses a fixed internal wait (a single recv call, "MX:
+    // 3" in the request itself), not a caller-supplied duration, so timeout_sec is unused here;
+    // kept for HWProber conformance so callers don't need to know that.
+    (void)timeout_sec;
+
+    params.ip_address = find_wifi_shield ();
+    // find_wifi_shield() always returns *something* - the SSDP-discovered address, or the
+    // shield's well-known default AP-mode address (192.168.4.1) if SSDP got no reply - so this
+    // never reports failure, matching prepare_session()'s previous behavior, which never
+    // branched on it either.
+    return true;
 }
 
 int OpenBCIWifiShieldBoard::wait_for_http_resp (http_t *request)
