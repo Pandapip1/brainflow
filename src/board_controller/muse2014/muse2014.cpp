@@ -46,19 +46,18 @@
 //                        that persists across packets (seeded by the most
 //                        recent E0 reference frame).
 //
-// IMPORTANT: in MuseDotNet's ParsePacket, the persistent carry array and the
-// freshly-decoded per-packet quantization/median arrays are reversed in place
-// (Array.Reverse) before use, and the carry array is mutated by that reversal
-// across calls (C# arrays are reference types). Tracing this through two
-// consecutive packets shows the carry array's channel-order flips on every
-// call, while the freshly-decoded quant/median arrays are *always* reversed
-// from a fixed physical order - so the two are only correctly aligned on
-// every other packet, and mislabel channels on the others. This
-// implementation avoids that bug by keeping `carry` in a fixed physical-
-// channel index permanently (never reversed across calls) and only mapping
-// "bitstream block order" (which genuinely is the reverse of physical
-// channel order, confirmed by tracing a single packet in isolation) to
-// physical channel index transiently, within a single packet's decode.
+// IMPORTANT: in MuseDotNet's ParsePacket, the persistent carry array is
+// reversed in place (Array.Reverse) at the start of each C0 call. This is
+// necessary because Get10BitNums reversed the E0 output, leaving carry in
+// block order (TP10=0); the reversal at C0-entry restores physical order so
+// that block i uses carry[i] (TP9=block 0, AF7=1, AF8=2, TP10=3). Because
+// carry is a C# reference type, the reversal persists, so the NEXT C0 call
+// reverses again - flipping carry to block order - causing a per-packet
+// alternating bug where carry and the decoded data are misaligned on every
+// other packet. This implementation avoids that entirely: E0 is read
+// directly into physical-order carry (no reversal), and C0 iterates blk=0..3
+// with phys=blk, matching the bitstream's physical block order without ever
+// reversing carry.
 //
 // Command bytes sent on connect (from MuseDotNet, preset/params differ
 // slightly but the single-ASCII-letter-plus-arguments command style matches
@@ -150,6 +149,21 @@ void sleep_ms (int ms)
 
 } // namespace
 
+constexpr unsigned char cmd_version[] = {0x76, 0x20, 0x32, 0x0d}; // "v 2\r"
+constexpr unsigned char cmd_preset[] = {0x25, 0x20, 0x31, 0x30, 0x0d}; // "% 10\r"
+constexpr unsigned char cmd_start[] = {0x73, 0x20, 0x35, 0x0d}; // "s 5\r"
+constexpr unsigned char cmd_keepalive[] = {0x6b, 0x0d}; // "k\r"
+
+constexpr uint32_t resp_sync = 0xFFFFAA55u;
+
+// Raw values are 10-bit unsigned ADC codes. Scale factor below is an
+// *approximation by analogy* with BrainFlow's BLE Muse decoder (12-bit
+// samples scaled at 125.0/256.0 uV/LSB, i.e. ~0.488 uV/LSB) assuming the
+// same total input-referred voltage range and just accounting for the
+// 4x-coarser 10-bit resolution. NOT independently verified - validate
+// against a known-good reference once real data is flowing.
+constexpr double UV_PER_LSB = (125.0 / 256.0) * 4.0; // ~1.953 uV/LSB
+constexpr int MIDPOINT_10BIT = (1 << (10 - 1));
 
 Muse2014::Muse2014 (struct BrainFlowInputParams params)
     : BTLibBoard ((int)BoardIds::MUSE_2014_BOARD, params)
@@ -212,10 +226,6 @@ int Muse2014::start_stream (int buffer_size, const char *streamer_params)
     {
         return res;
     }
-
-    const unsigned char cmd_version[] = {0x76, 0x20, 0x32, 0x0d}; // "v 2\r"
-    const unsigned char cmd_preset[] = {0x25, 0x20, 0x31, 0x30, 0x0d}; // "% 10\r"
-    const unsigned char cmd_start[] = {0x73, 0x20, 0x35, 0x0d}; // "s 5\r"
 
     safe_logger (spdlog::level::trace, "Muse2014: sending startup command sequence");
     bluetooth_write_data ((const char *)cmd_version, (int)sizeof (cmd_version));
@@ -307,26 +317,35 @@ bool Muse2014::read_exact (unsigned char *buf, int len)
 
 bool Muse2014::find_sync ()
 {
-    unsigned char window[4] = {0, 0, 0, 0};
-    int filled = 0;
+    unsigned char buf[4];
+
+    if (!read_exact (buf, 4))
+    {
+        return false;
+    }
+
+    uint32_t window =
+        ((uint32_t)buf[0] << 24) |
+        ((uint32_t)buf[1] << 16) |
+        ((uint32_t)buf[2] <<  8) |
+        ((uint32_t)buf[3]);
+
     while (keep_alive)
     {
-        unsigned char b;
-        if (!read_exact (&b, 1))
-        {
-            return false;
-        }
-        window[0] = window[1];
-        window[1] = window[2];
-        window[2] = window[3];
-        window[3] = b;
-        filled++;
-        if (filled >= 4 && window[0] == 0xFF && window[1] == 0xFF && window[2] == 0xAA &&
-            window[3] == 0x55)
+        if (window == resp_sync)
         {
             return true;
         }
+
+        unsigned char b;
+        if (!read_exact(&b, 1))
+        {
+            return false;
+        }
+
+        window = (window << 8) | b;
     }
+
     return false;
 }
 
@@ -335,8 +354,7 @@ void Muse2014::send_keepalive_if_due ()
     double now = get_timestamp ();
     if (now - last_keepalive_timestamp >= 8.0)
     {
-        const unsigned char cmd[2] = {0x6b, 0x0d}; // "k\r"
-        bluetooth_write_data ((const char *)cmd, 2);
+        bluetooth_write_data ((const char *)cmd_keepalive, 2);
         last_keepalive_timestamp = now;
     }
 }
@@ -346,6 +364,7 @@ void Muse2014::handle_e0_packet (int num_rows, double *package)
     unsigned char raw[5];
     if (!read_exact (raw, 5))
     {
+        safe_logger(spdlog::level::warn, "Muse2014: failed reading E0 header");
         return;
     }
 
@@ -368,6 +387,7 @@ void Muse2014::handle_c0_packet (int num_rows, double *package)
     unsigned char header[5];
     if (!read_exact (header, 5))
     {
+        safe_logger(spdlog::level::warn, "Muse2014: failed reading C0 header");
         return;
     }
 
@@ -407,6 +427,7 @@ void Muse2014::handle_c0_packet (int num_rows, double *package)
     unsigned char len_bytes[2];
     if (!read_exact (len_bytes, 2))
     {
+        safe_logger (spdlog::level::warn, "Muse2014: failed reading C0 payload length");
         return;
     }
     int num_bits = ((int)len_bytes[0] << 8) | (int)len_bytes[1];
@@ -425,6 +446,7 @@ void Muse2014::handle_c0_packet (int num_rows, double *package)
     std::vector<unsigned char> payload ((size_t)num_bytes);
     if (!read_exact (payload.data (), num_bytes))
     {
+        safe_logger (spdlog::level::warn, "Muse2014: failed reading C0 payload body");
         return;
     }
 
@@ -437,14 +459,16 @@ void Muse2014::handle_c0_packet (int num_rows, double *package)
 
     BitReader reader (payload.data (), (size_t)num_bytes);
 
-    // Bitstream block order is the reverse of physical channel order - see the
-    // file-level comment for how this was confirmed. `carry`, `quant`, and
-    // `median` are all indexed by physical channel (0=TP9, 1=AF7, 2=AF8,
-    // 3=TP10); only the block-iteration order below is reversed.
+    // Bitstream block order is physical channel order (TP9=0, AF7=1, AF8=2,
+    // TP10=3), matching the E0 reference frame and the quant/median header.
+    // MuseDotNet's Array.Reverse(carry) at the top of ParsePacket undoes the
+    // reversal that Get10BitNums imposed on the E0 carry; since we read E0
+    // directly into physical-order carry (no reversal), we just use phys=blk
+    // here rather than 3-blk.
     int decoded[4][16];
     for (int blk = 0; blk < 4; blk++)
     {
-        int phys = 3 - blk;
+        int phys = blk;
 
         if (median[phys] == 0)
         {
@@ -494,10 +518,6 @@ void Muse2014::handle_c0_packet (int num_rows, double *package)
                 rem_bits++;
                 remainder = (int)reader.peek_bits_at (remainder_pos, rem_bits) - (int)max1less;
             }
-            if (rem_bits == 0)
-            {
-                reader.skip_bits (1);
-            }
             reader.skip_bits (rem_bits);
 
             int sign = reader.read_bits (1) ? 1 : -1;
@@ -526,15 +546,6 @@ void Muse2014::emit_batch (
     {
         return;
     }
-
-    // Raw values are 10-bit unsigned ADC codes. Scale factor below is an
-    // *approximation by analogy* with BrainFlow's BLE Muse decoder (12-bit
-    // samples scaled at 125.0/256.0 uV/LSB, i.e. ~0.488 uV/LSB) assuming the
-    // same total input-referred voltage range and just accounting for the
-    // 4x-coarser 10-bit resolution. NOT independently verified - validate
-    // against a known-good reference once real data is flowing.
-    constexpr double UV_PER_LSB = (125.0 / 256.0) * 4.0; // ~1.953 uV/LSB
-    constexpr int MIDPOINT_10BIT = 0x200;
 
     std::vector<int> eeg_channels = board_descr["default"]["eeg_channels"];
     int package_num_channel = board_descr["default"]["package_num_channel"].get<int> ();
@@ -599,16 +610,18 @@ void Muse2014::read_thread ()
             safe_logger (spdlog::level::debug, "Muse2014: start streaming");
         }
 
-        if (marker == 0xE0)
-        {
-            handle_e0_packet (num_rows, package);
+        switch (marker) {
+            case 0xE0:
+                handle_e0_packet (num_rows, package);
+                break;
+            case 0xC0:
+                handle_c0_packet (num_rows, package);
+                break;
+            default:
+                // any other byte immediately after sync: not a frame type we handle,
+                // loop back around to find_sync() and resync
+                break;
         }
-        else if (marker == 0xC0)
-        {
-            handle_c0_packet (num_rows, package);
-        }
-        // any other byte immediately after sync: not a frame type we handle,
-        // loop back around to find_sync() and resync
     }
     delete[] package;
 }

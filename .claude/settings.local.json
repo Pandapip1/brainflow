@@ -1,0 +1,30 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(sed -n '46,70p' src/board_controller/aavaa/aavaa_v3.cpp)",
+      "Bash(sed -n '262,273p' src/board_controller/aavaa/aavaa_v3.cpp)",
+      "Bash(sed -n '66,88p' src/board_controller/openbci/ganglion_native.cpp)",
+      "Bash(sed -n '286,295p' src/board_controller/openbci/ganglion_native.cpp)",
+      "Bash(sed -n '140,175p' src/board_controller/brainalive/brainalive.cpp)",
+      "Bash(sed -n '140,200p' src/board_controller/aavaa/aavaa_v3.cpp)",
+      "Bash(sed -n '160,195p' src/board_controller/openbci/ganglion_native.cpp)",
+      "Bash(cmake *)",
+      "Bash(PYTHONPATH=/home/gavin/Projects/brainflow/python_package python3 /home/gavin/Projects/brainflow/python_package/examples/tests/board_descr.py)",
+      "Bash(python3 *)",
+      "Bash(PYTHONPATH=/home/gavin/Projects/brainflow/python_package:/nix/store/l59n6vzkswz23y6s4pr6cmv2p4dpd5f0-python3.13-numpy-2.4.4/lib/python3.13/site-packages python3 /home/gavin/Projects/brainflow/python_package/examples/tests/board_descr.py)",
+      "Bash(PYTHONPATH=/home/gavin/Projects/brainflow/python_package:/nix/store/l59n6vzkswz23y6s4pr6cmv2p4dpd5f0-python3.13-numpy-2.4.4/lib/python3.13/site-packages python3 /home/gavin/Projects/brainflow/python_package/examples/tests/band_power.py)",
+      "Bash(PYTHONPATH=/home/gavin/Projects/brainflow/python_package:$NP python3 *)",
+      "Bash(PYTHONPATH=/home/gavin/Projects/brainflow/python_package:/nix/store/l59n6vzkswz23y6s4pr6cmv2p4dpd5f0-python3.13-numpy-2.4.4/lib/python3.13/site-packages python3 python_package/examples/tests/markers.py --board-id -1)",
+      "Bash(ldd /home/gavin/Projects/brainflow/python_package/brainflow/lib/libBrainFlowBluetooth.so)",
+      "Bash(hciconfig)",
+      "Bash(hcitool scan *)",
+      "Bash(PYTHONPATH=/home/gavin/Projects/brainflow/python_package:$NP:$PYQ:$PS6:$SB6:$CL python3 *)",
+      "WebSearch",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:hackaday.io)",
+      "WebFetch(domain:alexandre.barachant.org)",
+      "WebFetch(domain:mind-monitor.com)",
+      "WebFetch(domain:raw.githubusercontent.com)"
+    ]
+  }
+}

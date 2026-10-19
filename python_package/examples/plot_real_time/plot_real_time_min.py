@@ -44,6 +44,8 @@ class Graph:
 
     def update(self):
         data = self.board_shim.get_current_board_data(self.num_points)
+        if data.shape[1] < 1:
+            return
         for count, channel in enumerate(self.exg_channels):
             # plot timeseries
             DataFilter.detrend(data[channel], DetrendOperations.CONSTANT.value)
